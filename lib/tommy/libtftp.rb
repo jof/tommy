@@ -1,27 +1,5 @@
 #!/usr/bin/env ruby
 
-# Copyright (c) 2007, Gregory Fleischer (gfleischer@gmail.com)
-#
-# All rights reserved.
-#
-# Redistribution and use in source and binary forms, with or without
-# modification, are permitted provided that the following conditions
-# are met:
-#  
-#   1. Redistributions of source code must retain the above copyright
-#      notice, this list of conditions and the following disclaimer.
-#   2. Redistributions in binary form must reproduce the above copyright
-#      notice, this list of conditions and the following disclaimer in
-#      the documentation and/or other materials provided with the
-#      distribution.
-#   3. The names of the authors may not be used to endorse or promote
-#      products derived from this software without specific prior
-#      written permission.
-#  
-# THIS SOFTWARE IS PROVIDED ``AS IS'' AND WITHOUT ANY EXPRESS OR
-# IMPLIED WARRANTIES, INCLUDING, WITHOUT LIMITATION, THE IMPLIED
-# WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE.
-
 # library for TFTP functions
 
 require 'socket'
@@ -44,16 +22,13 @@ end
 
 class TFTPImplementation
 
-  attr_accessor :socket, :timeout, :client, :verbose, :request_callback, :io_callback
+  attr_accessor :socket, :timeout, :client, :request_callback
 
-  def initialize(socket, timeout = 5, client = [], verbose = TRUE, request_callback = nil, io_callback = nil)
+  def initialize(socket, timeout, client, request_callback)
     @socket = socket
-    @timeout = timeout
-    @client = client
-    @verbose = verbose
-    @request_callback = request_callback
-    @io_callback = io_callback
-    @io = nil
+    @timeout = timeout || 5
+    @client = client || []
+    @request_callback = request_callback || nil
   end
 
   def get_options(args)
@@ -68,15 +43,11 @@ class TFTPImplementation
   end
   
   def trace(msg)
-    if @verbose
-      puts msg
-    end
+    $LOG.info(msg) if $LOG
   end
 
   def debugmsg(msg)
-    if FALSE
-      puts msg if @verbose
-    end
+    $LOG.debug(msg) if $LOG
   end
 
   def trace_received_with_options(msg, args)
@@ -154,38 +125,43 @@ class TFTPImplementation
             trace "Incoming write request for [%s] from [%s:%s]" % [requested_filename, client[3], client[1]]
           end
 
-          ## Ask the callbacks how to handle this request.
-          if @request_callback != nil then # If the request_callback is defined, ask if we should handle this request at all
-            begin
-              response = @request_callback.call(@socket, client, opcode, requested_filename, mode, options)
-
-              return nil if response == FALSE
-
-            rescue Exception => e
-              trace "request: caught exception: " + e.to_s + "\n" + e.backtrace.join("\n")
-              TFTPError.UnknownError(@socket, e, client)
-              return nil
+          # TODO
+          ###
+          begin
+            # The request callback should return a nil or an IO-type object that can be written or read to (depending on the opcode)
+            request_callback = @request_callback.call(@socket, client, opcode, requested_filename, mode, options)
+            p 'here'
+            $LOG.debug("handling #{@request_callback.inspect}")
+            $LOG.debug("handling #{request_callback.inspect}")
+            if request_callback.nil?
+              TFTPError.UnknownError(@socket, "Denied.", client)
+              next
             end
-          end
 
-          case opcode
-          when TFTPOpCode::RRQ
-            trace "Accepted incoming read request for [%s] from [%s:%s]" % [requested_filename, client[3], client[1]]
-          when TFTPOpCode::WRQ
-            trace "Accepted incoming write request for [%s] from [%s:%s]" % [requested_filename, client[3], client[1]]
-          end
+            case request_callback.class
+            when String
+              request_callback = StringIO.new(request_callback)
+            when StringIO
+            when File
+            when IO
+            else
+              raise ArgumentError.new("The request_callback [%s] is of non-IOable type [%s]" % [request_callback.inspect, request_callback.class])
+            end
 
-          if @io_callback != nil then # Ask the io_callback if IO for this request should be handled specially
-            io = @io_callback.call(@socket, client, opcode, requested_filename, mode, options)
+            case opcode
+            when TFTPOpCode::RRQ
+              return TFTPServerRead.new(io, mode, client, options)
+            when TFTPOpCode::WRQ
+              return TFTPServerWrite.new(io, mode, client, options)
+            end
+          rescue Exception => e
+            $LOG.debug("Caught error calling request_callback: #{e.inspect}")
+            exit
           end
           ##
 
-          if TFTPOpCode::RRQ == opcode then
-            return TFTPServerRead.new(@host, io, mode, client, options, @verbose)
-          elsif TFTPOpCode::WRQ == opcode then
-            return TFTPServerWrite.new(@host, @io, mode, client, options, @verbose)
-          end
-        else
+
+        else #The opcode is not a RRQ or WRQ
           trace "unexpected data received: [%s]" % msg
         end
       end
@@ -350,7 +326,6 @@ class TFTPImplementation
   end
 
   def error(errorcode, errmsg, socket = @socket, timeout = @timeout)
-    caller.each{|l| puts l}
     trace "sent ERROR <code=%s, msg=%s>" % [errorcode, errmsg]
     socket.send(
                 [
@@ -423,8 +398,6 @@ class TFTPError
   end
 
   def TFTPError.GenericError(socket, code, client)
-    puts "GENERIC ERROR:"
-    caller.each{|l| puts l}
     TFTPImplementation.new(socket, 5, client).error(                 
                                           code,
                                           CodeToMsg(code)
@@ -432,8 +405,6 @@ class TFTPError
   end
 
   def TFTPError.UnknownError(socket, msg, client)
-    puts "UNKNOWN ERROR:"
-    caller.each{|l| puts l}
     TFTPImplementation.new(socket, 5, client).error(                 
                                           NOT_DEFINED, 
                                           msg.to_s.empty? ? CodeToMsg(NOT_DEFINED) : msg.to_s
@@ -441,8 +412,6 @@ class TFTPError
 
   end
   def TFTPError.FileNotFound(socket, client)
-    puts "FILE-NOT-FOUND ERROR:"
-    caller.each{|l| puts l}
     GenericError(socket, FILE_NOT_FOUND, client)
   end
   def TFTPError.AccessViolation(socket, client)
@@ -468,36 +437,38 @@ class TFTPError
 
 end
 
+# Handle an incoming read request.
 class TFTPServerRead
   
-  def initialize(host, io, mode, client, options, verbose)
+  def initialize(io, mode, client, options)
+
+    unless io.is_a?(IO) then
+      raise ArgumentError
+    end
 
     @host = host
     @io = io
     @mode = mode
     @client = client
     @options = options
-    @verbose = verbose
 
     # set some defaults
     @retransmit = 4
     @timeout = 5 
     @blocksize = 512 
 
+    trace "read request for [%s] from [%s:%s]" % [@io.inspect, @client[3], @client[1]]
     @socket = UDPSocket.new
     @socket.bind(0,0)
 
-    @tftp = TFTPImplementation.new(@socket, @timeout, @client, @verbose)
+    @tftp = TFTPImplementation.new(@socket, @timeout, @client)
   end
 
   def trace(msg)
-    puts msg if @verbose
+    $LOG.info(msg) if $LOG
   end
 
   def process
-
-    unless @rendered_response
-    end
 
     begin
 
@@ -563,15 +534,8 @@ class TFTPServerRead
         end
       end
 
-#      if @rendered_response then
-#        file = StringIO.new(@rendered_response)
-#      else
-#        file = open @filename, 'r'
-#      end
-      
       written = 0
-      while written < size
-        buf = @io.read(blocksize)
+      while buf = @io.read(blocksize)
         blocknum = (blocknum + 1) % 65536
         retransmit = @retransmit
         
@@ -605,10 +569,12 @@ class TFTPServerRead
       end
 
 
+      # FIXME
       if 0 == size % blocksize:
           # send an extra
           @tftp.data_write((blocknum + 1) % 65536, "")
       end
+      #
 
       trace "completed file read"
 
@@ -625,18 +591,16 @@ end
 
 class TFTPServerWrite
 
-  def initialize(host, io, mode, client, options, verbose)
+  def initialize(io, mode, client, options)
 
     unless io.is_a?(IO) then
       raise ArgumentError
     end
 
-    @host = host
     @io = io
     @mode = mode
     @client = client
     @options = options
-    @verbose = verbose
 
     # set some defaults
     @retransmit = 4
@@ -647,12 +611,12 @@ class TFTPServerWrite
     @socket = UDPSocket.new
     @socket.bind(0,0)
 
-    @tftp = TFTPImplementation.new(@socket, @timeout, @client, @verbose)
+    @tftp = TFTPImplementation.new(@socket, @timeout, @client)
 
   end
 
   def trace(msg)
-    trace msg if @verbose
+    $LOG.info(msg) if $LOG
   end
   
   def process
@@ -763,7 +727,6 @@ end
 class TFTPClient
 
   def initialize()
-    @verbose = TRUE
   end
 
   def connect(addr, port)
@@ -772,16 +735,12 @@ class TFTPClient
   end
 
   def trace(msg)
-    if @verbose
-      puts msg if @verbose
-    end
+    $LOG.info(msg) if $LOG
   end
 
   def read(host, addr, port, mode, remotefile, localfile, blksize, timeout, tsize, trace)
 
     begin 
-
-      @verbose = trace
 
       connect(addr, port)
 
@@ -1066,21 +1025,21 @@ end
 # server
 class TFTPServer
 
-  def initialize(host = '0.0.0.0', port = 6969, verbose = FALSE, request_callback = nil, io_callback = nil )
-    @host = host
+  def initialize(host, port, request_callback)
+    $LOG.info("TFTP Server starting...")
+    @host = host || '0.0.0.0'
+    @port = port || 6969
+    @request_callback = request_callback
+
     @socket = UDPSocket.new
-    @socket.bind host, port
-    @verbose = verbose
-    @tftp = TFTPImplementation.new(@socket)
-    @tftp.verbose = verbose
+    @socket.bind @host, @port
+
+    @tftp = TFTPImplementation.new(@socket, 5, [], request_callback)
     @tftp.request_callback = request_callback
-    @tftp.io_callback = io_callback
   end
 
   def trace(msg)
-    if @verbose
-      puts msg
-    end
+    $LOG.info(msg) if $LOG
   end
 
   def process_request(request)
