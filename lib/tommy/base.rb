@@ -102,13 +102,13 @@ module Tommy
           param = matches[0].to_sym if matches
           captures << param if param
           if param then
-          "([a-zA-Z0-9\\-_]+)"
+            return "([a-zA-Z0-9\\-_]+)"
           else
-            x
+            return x
           end
         end 
         route_regex = Regexp.new(route_regex_parts.join('/'))
-      when Regex
+      when Regexp
         route_regex = route_spec
       end
 
