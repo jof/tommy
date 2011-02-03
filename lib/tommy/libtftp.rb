@@ -43,10 +43,6 @@ class TFTPImplementation
   end
   
   def trace(msg)
-    $LOG.info(msg) if $LOG
-  end
-
-  def debugmsg(msg)
     $LOG.debug(msg) if $LOG
   end
 
@@ -56,7 +52,7 @@ class TFTPImplementation
     options.each {|k,v|
      opts.insert(-1, ", %s=%s" % [k,v])
     }
-    trace "received %s%s>" % [msg, opts]
+    $LOG.debug("received %s%s>" % [msg, opts])
   end
 
   def trace_received(msg, client)
@@ -104,14 +100,14 @@ class TFTPImplementation
           requested_filename = data[1]
           mode = data[2]
           if requested_filename.nil? or requested_filename.empty? or mode.nil? or mode.empty? then
-            trace "missing filename or mode in request"
+            $LOG.warn("Request packet is missing a filename or transfer mode")
             next
           end
           case mode.downcase
           when "netascii", "octet"
           when "mail" # deprecated
           else
-            trace "bad mode: [%s]" % mode
+            $LOG.warn("Received a bad transfer mode ('%s') from [%s:%s]" % [mode, client[3], client[1]])
             next
           end
 
@@ -120,25 +116,21 @@ class TFTPImplementation
 
           case opcode
           when TFTPOpCode::RRQ
-            trace "Incoming read request for [%s] from [%s:%s]" % [requested_filename, client[3], client[1]]
+            $LOG.info("Incoming read request packet for [%s] from [%s:%s]" % [requested_filename, client[3], client[1]])
           when TFTPOpCode::WRQ
-            trace "Incoming write request for [%s] from [%s:%s]" % [requested_filename, client[3], client[1]]
+            $LOG.info("Incoming write request packet for [%s] from [%s:%s]" % [requested_filename, client[3], client[1]])
           end
 
-          # TODO
           ###
           begin
             # The request callback should return a nil or an IO-type object that can be written or read to (depending on the opcode)
             request_callback = @request_callback.call(@socket, client, opcode, requested_filename, mode, options)
-            p 'here'
-            $LOG.debug("handling #{@request_callback.inspect}")
-            $LOG.debug("handling #{request_callback.inspect}")
             if request_callback.nil?
               TFTPError.UnknownError(@socket, "Denied.", client)
               next
             end
 
-            case request_callback.class
+            case request_callback
             when String
               request_callback = StringIO.new(request_callback)
             when StringIO
@@ -150,19 +142,20 @@ class TFTPImplementation
 
             case opcode
             when TFTPOpCode::RRQ
-              return TFTPServerRead.new(io, mode, client, options)
+              return TFTPServerRead.new(request_callback, mode, client, options)
             when TFTPOpCode::WRQ
-              return TFTPServerWrite.new(io, mode, client, options)
+              return TFTPServerWrite.new(request_callback, mode, client, options)
             end
           rescue Exception => e
-            $LOG.debug("Caught error calling request_callback: #{e.inspect}")
+            $LOG.debug("Caught error calling request_callback and/or handling it: #{e.inspect}")
+            e.backtrace.each{|x| puts x}
             exit
           end
           ##
 
 
         else #The opcode is not a RRQ or WRQ
-          trace "unexpected data received: [%s]" % msg
+          $LOG.warn("Mangled packet received: %s" % msg)
         end
       end
     end
@@ -218,7 +211,7 @@ class TFTPImplementation
     Timeout::timeout(timeout) do
       # wait for data block
       while TRUE
-        debugmsg "waiting for data: block %d" % blocknum
+        trace "waiting for data: block %d" % blocknum
         msg, client = socket.recvfrom(65535)
         trace_received(msg, client)
         if client[3] == @client[3] then
@@ -252,7 +245,7 @@ class TFTPImplementation
     Timeout::timeout(@timeout) do
       # wait for ack
       while TRUE
-        debugmsg "waiting for ack: block %d" % blocknum
+        trace "waiting for ack: block %d" % blocknum
         msg, client = @socket.recvfrom(65535)
         trace_received(msg, client)
         if client[3] == @client[3] then
@@ -288,9 +281,9 @@ class TFTPImplementation
     Timeout::timeout(@timeout) do
       # wait for oack/ack
       while TRUE
-        debugmsg "waiting for oack: block %d" % blocknum
+        trace "waiting for oack: block %d" % blocknum
         msg, client = @socket.recvfrom(65535)
-        debugmsg "received from #{client}"
+        trace "received from #{client}"
         trace_received(msg, client)
         if client[3] == @client[3] then
           if @client[1].nil? then
@@ -398,14 +391,14 @@ class TFTPError
   end
 
   def TFTPError.GenericError(socket, code, client)
-    TFTPImplementation.new(socket, 5, client).error(                 
+    TFTPImplementation.new(socket, 5, client, nil).error(                 
                                           code,
                                           CodeToMsg(code)
                                           )
   end
 
   def TFTPError.UnknownError(socket, msg, client)
-    TFTPImplementation.new(socket, 5, client).error(                 
+    TFTPImplementation.new(socket, 5, client, nil).error(                 
                                           NOT_DEFINED, 
                                           msg.to_s.empty? ? CodeToMsg(NOT_DEFINED) : msg.to_s
                                           )
@@ -442,11 +435,6 @@ class TFTPServerRead
   
   def initialize(io, mode, client, options)
 
-    unless io.is_a?(IO) then
-      raise ArgumentError
-    end
-
-    @host = host
     @io = io
     @mode = mode
     @client = client
@@ -461,11 +449,12 @@ class TFTPServerRead
     @socket = UDPSocket.new
     @socket.bind(0,0)
 
-    @tftp = TFTPImplementation.new(@socket, @timeout, @client)
+    @tftp = TFTPImplementation.new(@socket, @timeout, @client, nil)
+    
   end
 
   def trace(msg)
-    $LOG.info(msg) if $LOG
+    $LOG.debug(msg) if $LOG
   end
 
   def process
@@ -525,10 +514,10 @@ class TFTPServerRead
             break
 
           rescue Timeout::Error
-            trace "got a timeout"
+            $LOG.warn("Got a timeout sending an OACK response to [%s:%s]" % [client[3], client[1]])
             retransmit -= 1
           rescue Errno::ECONNREFUSED
-            trace "connection refused from client"
+            $LOG.warn("Connection refused from client while sending an OACK response to [%s:%s]. Spoofers?" % [client[3], client[1]])
             return
           end
         end
@@ -550,17 +539,17 @@ class TFTPServerRead
             break
 
           rescue Timeout::Error
-            trace "got a timeout"
+            $LOG.warn("Got a timeout sending a data block to [%s:%s]" % [client[3], client[1]])
             retransmit -= 1
           rescue Errno::ECONNREFUSED
-            trace "connection refused from client"
+            $LOG.warn("Connection refused from client while sending a data block to [%s:%s]. Spoofers?" % [client[3], client[1]])
             return
           end
         end
 
         if 0 == retransmit then
           # timedout
-          trace "DATA write timed out"
+          $LOG.warn("Timed out sending data to [%s:%s]" % [client[3], client[1]])
           return
         end
 
@@ -569,7 +558,7 @@ class TFTPServerRead
       end
 
 
-      # FIXME
+      # FIXME / WTF
       if 0 == size % blocksize:
           # send an extra
           @tftp.data_write((blocknum + 1) % 65536, "")
@@ -589,13 +578,10 @@ class TFTPServerRead
 
 end
 
+# Handle an incoming write request
 class TFTPServerWrite
 
   def initialize(io, mode, client, options)
-
-    unless io.is_a?(IO) then
-      raise ArgumentError
-    end
 
     @io = io
     @mode = mode
@@ -611,12 +597,12 @@ class TFTPServerWrite
     @socket = UDPSocket.new
     @socket.bind(0,0)
 
-    @tftp = TFTPImplementation.new(@socket, @timeout, @client)
+    @tftp = TFTPImplementation.new(@socket, @timeout, @client, nil)
 
   end
 
   def trace(msg)
-    $LOG.info(msg) if $LOG
+    $LOG.debug(msg) if $LOG
   end
   
   def process
@@ -676,10 +662,10 @@ class TFTPServerWrite
             break
 
           rescue Timeout::Error
-            trace "got a timeout"
+            $LOG.warn("Got a timeout reading a data block from [%s:%s]" % [client[3], client[1]])
             retransmit -= 1
           rescue Errno::ECONNREFUSED
-            trace "connection refused from client"
+            $LOG.warn("Connection refused from [%s:%s] while reading data blocks. Spoofers?" % [client[3], client[1]])
             return
           end
         end
@@ -688,7 +674,7 @@ class TFTPServerWrite
 
         if 0 == retransmit then
           # timedout
-          trace "DATA read timed out"
+          $LOG.warn("Timed out reading data from [%s:%s]" % [client[3], client[1]])
           return
         end
 
@@ -705,8 +691,6 @@ class TFTPServerWrite
 
       end
 
-      trace "completed file write"
-
       # final ack
       @tftp.ack_write(blocknum)
 
@@ -721,308 +705,6 @@ class TFTPServerWrite
 
 end
 
-
-# client
-
-class TFTPClient
-
-  def initialize()
-  end
-
-  def connect(addr, port)
-    @socket = UDPSocket.new
-    @socket.bind(0, 0)
-  end
-
-  def trace(msg)
-    $LOG.info(msg) if $LOG
-  end
-
-  def read(host, addr, port, mode, remotefile, localfile, blksize, timeout, tsize, trace)
-
-    begin 
-
-      connect(addr, port)
-
-      tftp = TFTPImplementation.new(@socket, timeout, ['AF_INET', nil, host, addr], trace)
-      
-      options = {}
-      if tsize 
-        options["tsize"] = "0"
-      end
-      if blksize != 512
-        options["blksize"] = blksize
-        blksize = 512
-      end
-      if timeout != 5
-        options["timeout"] = timeout
-        timeout = 5
-      end
-
-      file = nil
-      blocknum = 0
-      keep_reading = TRUE
-      # send read request
-      tftp.rrq(addr, port, remotefile, mode, options)
-      
-      first = TRUE
-
-      while keep_reading
-
-        retransmit = 4
-        data_block = nil
-
-        while retransmit > 0
-          begin
-            if first and not options.empty? 
-              options, data_block = tftp.oack_read(blocknum)
-              if not options.empty?
-                options.each do |k,v|
-                  if not k.empty? and not v.empty? then
-                    case k.downcase
-                    when "blksize"
-                      t = v.to_i
-                      if 8 <= t and t <= 65464 then
-                        blksize = t
-                      else
-                        # bad value
-                        TFTPError.BadOptions(@socket, tftp.client)
-                        raise TFTPException("invalid option value; %s: %s" % [k,v])
-                      end
-                    when "timeout"
-                      t = v.to_i
-                      if 1 <= t and t <= 255 then
-                        tftp.timeout = t
-                      else
-                        # bad value
-                        TFTPError.BadOptions(@socket, tftp.client)
-                        raise TFTPException("invalid option value; %s: %s" % [k,v])
-                      end
-                    when "tsize"
-                      t = v.to_i
-                      if 0 <= t then
-                        size = t
-                      end
-                    end
-                  end
-                end
-
-                tftp.ack_write(blocknum)
-              end
-            end
-
-            if data_block.nil?
-              data_block = tftp.data_read((blocknum + 1) % 65536)
-            end
-
-            first = FALSE
-            break
-
-          rescue Timeout::Error
-            trace "got a timeout"
-            retransmit -= 1
-          rescue Errno::ECONNREFUSED
-            trace "connection refused from client"
-            return
-          end
-        end
-
-        if 0 == retransmit then
-          # timedout
-          trace "DATA read timed out"
-          return
-        end
-
-        if file.nil? then
-          file = open(localfile, 'w')
-        end
-
-        if "netascii" == mode
-          data_block.gsub!(/\r\n/){|m| "\n"}
-        end
-
-        file.write(data_block)
-        file.flush
-
-        # block written
-        blocknum = (blocknum + 1) % 65536
-
-        # send ack
-        tftp.ack_write(blocknum)
-
-        if data_block.length < blksize then
-          file.close
-          keep_reading = FALSE
-        end
-
-      end
-
-      trace "completed file read"
-
-      return TRUE
-
-    rescue TFTPException => e
-      trace "read: caught TFTP exception: " + e.to_s
-    rescue Exception => e
-      trace "read: caught exception: " + e.to_s + "\n" + e.backtrace.join("\n")
-      TFTPError.UnknownError(@socket, "unknown error", tftp.client)
-    end
-
-  end
-
-  def write(host, addr, port, mode, localfile, remotefile, blksize, timeout, tsize, trace)
-    begin 
-
-      connect(addr, port)
-
-      tftp = TFTPImplementation.new(@socket, timeout, ['AF_INET', nil, host, addr], trace)
-      
-      size = File.stat(localfile).size
-      file = open(localfile, 'r')
-
-      options = {}
-      if tsize 
-        options["tsize"] = size
-      end
-      if blksize != 512
-        options["blksize"] = blksize
-        blksize = 512
-      end
-      if timeout != 5
-        options["timeout"] = timeout
-        timeout = 5
-      end
-
-      blocknum = 0
-      keep_writing = TRUE
-
-      # send write request
-      tftp.wrq(addr, port, remotefile, mode, options)
-
-      if not options.empty?
-        options, data_block = tftp.oack_read(blocknum)
-        if not options.empty?
-          options.each do |k,v|
-            if not k.empty? and not v.empty? then
-              case k.downcase
-              when "blksize"
-                t = v.to_i
-                if 8 <= t and t <= 65464 then
-                  blksize = t
-                else
-                  # bad value
-                  TFTPError.BadOptions(@socket, tftp.client)
-                  raise TFTPException("invalid option value; %s: %s" % [k,v])
-                end
-              when "timeout"
-                t = v.to_i
-                if 1 <= t and t <= 255 then
-                  tftp.timeout = t
-                else
-                  # bad value
-                  TFTPError.BadOptions(@socket, tftp.client)
-                  raise TFTPException("invalid option value; %s: %s" % [k,v])
-                end
-              when "tsize"
-                t = v.to_i
-              end
-            end
-          end
-
-          if not data_block.nil?
-            # not allowed here
-            TFTPError.IllegalOperation(@socket, tftp.client)
-            raise TFTPException("bad operation")
-          end
-        end
-      else
-        tftp.ack_read(blocknum)
-      end
-
-      written = 0
-      pending_length = 0
-      pending_data = ""
-      while written < size
-
-        retransmit = 4
-        if 0 == pending_length
-          data_block = file.read(blksize)
-        else
-          data_read = file.read(blksize - pending_length)
-          if data_read.nil?
-            data_block = pending_data
-          else
-            data_block = pending_data + data_read
-          end
-          pending_data = ""
-        end
-
-        if "netascii" == mode
-          original_size = data_block.length
-          # what??? ruby doesn't have lookbehind?
-          # data_block.gsub!(/(?<!\r)\n/) {|c| "\r\n"}
-          # oh well, do it ghetto ;)
-          data_block.gsub!(/\r\n/) {|c| "\n"}
-          data_block.gsub!(/\n/) {|c| "\r\n"}
-          pending_length =  data_block.length - original_size
-          if pending_length > 0
-            pending_data = data_block[blksize, pending_length]
-            size += pending_length
-            data_block = data_block[0, blksize]
-          end
-        end
-
-        blocknum = (blocknum + 1) % 65536
-
-        while retransmit > 0
-          begin
-
-            # send data
-            tftp.data_write(blocknum, data_block)
-            tftp.ack_read(blocknum)
-
-            # data sent, ack received
-            break
-
-          rescue Timeout::Error
-            trace "got a timeout"
-            retransmit -= 1
-          rescue Errno::ECONNREFUSED
-            trace "connection refused from client"
-            return
-          end
-        end
-
-        if 0 == retransmit then
-          # timedout
-          trace "DATA write timed out"
-          return
-        end
-
-        written += blksize
-
-      end
-
-      if 0 == (size % blksize)
-        # send an extra
-        tftp.data_write((blocknum + 1) % 65536, "")
-      end
-
-      trace "completed file write"
-
-      return TRUE
-
-    rescue TFTPException => e
-      trace "read: caught TFTP exception: " + e.to_s
-    rescue Exception => e
-      trace "read: caught exception: " + e.to_s + "\n" + e.backtrace.join("\n")
-      TFTPError.UnknownError(@socket, "unknown error", tftp.client)
-    end
-  end
-  
-end
-
-# server
 class TFTPServer
 
   def initialize(host, port, request_callback)
@@ -1039,7 +721,7 @@ class TFTPServer
   end
 
   def trace(msg)
-    $LOG.info(msg) if $LOG
+    $LOG.debug(msg) if $LOG
   end
 
   def process_request(request)
@@ -1052,7 +734,7 @@ class TFTPServer
     Thread.exit
   end
 
-  def listen()
+  def listen
     keep_looping = TRUE
     threads = []
     while keep_looping 
@@ -1075,7 +757,3 @@ class TFTPServer
   end
 
 end
-
-# eof
-
-

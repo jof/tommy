@@ -1,7 +1,7 @@
 Gem::Specification.new do |s|
   s.name = 'tommy'
-  s.version = '0.1a'
-  s.date = '2011-01-19'
+  s.version = '0.1.2'
+  s.date = '2011-02-03'
 
   s.description = "A TFTP Server that supports dynamic content"
   s.summary     = "A TFTP Server that supports dynamic content"
@@ -11,8 +11,8 @@ Gem::Specification.new do |s|
 
   s.files = %w[
     lib/tommy.rb
-    lib/tommy/libtftp.rb
     lib/tommy/base.rb
+    lib/tommy/libtftp.rb
     tommy.gemspec
   ]
 end

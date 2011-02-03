@@ -3,7 +3,7 @@ require 'logger'
 require 'tommy/base'
 
 module Tommy
-  VERSION = '0.1a'
+  VERSION = '0.1.2'
 end
 
 $LOG = Logger.new(STDOUT)
