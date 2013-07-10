@@ -606,18 +606,13 @@ class TFTPServerWrite
   end
   
   def process
-
     begin
-
       blocksize = @blocksize
-
       size = 0
       written = 0
       blocknum = 0
       retransmit = @retransmit
-
       oack_response = {}
-
       @options.each do |k,v|
         if not k.empty? and not v.empty? then
           case k.downcase
@@ -638,29 +633,22 @@ class TFTPServerWrite
           end
         end
       end
-
       file = nil
-
       keep_writing = TRUE
       first = TRUE
       while keep_writing
-
         retransmit = @retransmit
         data_block = nil
         while retransmit > 0
           begin
-
             if (not oack_response.empty?) and first then
               @tftp.oack_write(blocknum, oack_response)
             else
               @tftp.ack_write(blocknum)
             end
-
             data_block = @tftp.data_read((blocknum + 1) % 65536)
-
             # ack sent, data received
             break
-
           rescue Timeout::Error
             $LOG.warn("Got a timeout reading a data block from [%s:%s]" % [client[3], client[1]])
             retransmit -= 1
@@ -669,38 +657,29 @@ class TFTPServerWrite
             return
           end
         end
-
         first = FALSE
-
         if 0 == retransmit then
           # timedout
           $LOG.warn("Timed out reading data from [%s:%s]" % [client[3], client[1]])
           return
         end
-
         @io.write(data_block)
         @io.flush
-
         # block written
         blocknum = (blocknum + 1) % 65536
-
         if data_block.length < blocksize then
           io.close
           keep_writing = FALSE
         end
-
       end
-
       # final ack
       @tftp.ack_write(blocknum)
-
     rescue TFTPException => e
       trace "write: caught TFTP exception: " + e.to_s
     rescue Exception => e
       trace "write: caught exception: " + e.to_s + "\n" + e.backtrace.join("\n")
       TFTPError.UnknownError(@socket, e, @client)
     end
-
   end
 
 end

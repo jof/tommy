@@ -1,5 +1,5 @@
 --- 
 :port: 6969
-:directory: /Users/jof/src/tommy/public
+:file_directory: /Users/jof/src/tommy/public
 :addr: 127.0.0.1
 :log_level: 0
